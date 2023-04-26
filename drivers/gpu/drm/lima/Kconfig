@@ -14,3 +14,18 @@ config DRM_LIMA
        select DEVFREQ_GOV_SIMPLE_ONDEMAND
        help
 	 DRM driver for ARM Mali 400/450 GPUs.
+
+config DRM_LIMA_OF_ID_PREFIX
+       string "Device Tree ID prefix"
+       default "arm,mali-"
+       depends on DRM_LIMA
+       help
+	 ID prefix specified in the compatible property of the device tree.
+
+config DRM_LIMA_OF_ID_PARAMETERIZE
+       bool "Parameterize Device Tree ID"
+       default n
+       depends on DRM_LIMA
+       help
+	 Parameterize the device ID of Lima so that it can be changed at boot time.
+	 For example, specify lima.of_400_id=arm,mali-400 as a boot paramater.

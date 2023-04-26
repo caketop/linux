@@ -460,11 +460,30 @@ static int lima_pdev_remove(struct platform_device *pdev)
 	return 0;
 }
 
-static const struct of_device_id dt_match[] = {
-	{ .compatible = "arm,mali-400", .data = (void *)lima_gpu_mali400 },
-	{ .compatible = "arm,mali-450", .data = (void *)lima_gpu_mali450 },
+#ifdef CONFIG_DRM_LIMA_OF_ID_PREFIX
+#define OF_ID_PREFIX CONFIG_DRM_LIMA_OF_ID_PREFIX
+#else
+#define OF_ID_PREFIX "arm,mali-"
+#endif
+
+#ifdef CONFIG_DRM_LIMA_OF_ID_PARAMETERIZE
+static struct of_device_id dt_match[] = {
+	{ .compatible = OF_ID_PREFIX "400", .data = (void *)lima_gpu_mali400 },
+	{ .compatible = OF_ID_PREFIX "450", .data = (void *)lima_gpu_mali450 },
 	{}
 };
+module_param_string(of_400_id, dt_match[0].compatible, sizeof(dt_match[0].compatible), 0);
+MODULE_PARM_DESC(of_400_id, "Openfirmware id of mali-400 to be handled by lima");
+module_param_string(of_450_id, dt_match[1].compatible, sizeof(dt_match[1].compatible), 0);
+MODULE_PARM_DESC(of_450_id, "Openfirmware id of mali-450 to be handled by lima");
+#else
+static const struct of_device_id dt_match[] = {
+	{ .compatible = OF_ID_PREFIX "400", .data = (void *)lima_gpu_mali400 },
+	{ .compatible = OF_ID_PREFIX "450", .data = (void *)lima_gpu_mali450 },
+	{}
+};
+#endif
+
 MODULE_DEVICE_TABLE(of, dt_match);
 
 static const struct dev_pm_ops lima_pm_ops = {
