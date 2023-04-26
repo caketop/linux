@@ -26,6 +26,7 @@
 #include <drm/drm_gem_cma_helper.h>
 #include <drm/drm_of.h>
 #include <drm/drm_probe_helper.h>
+#include <drm/xlnx_drm.h>
 
 #include <linux/component.h>
 #include <linux/device.h>
@@ -43,9 +44,9 @@
 
 #define DRIVER_NAME	"xlnx"
 #define DRIVER_DESC	"Xilinx DRM KMS Driver"
-#define DRIVER_DATE	"20130509"
+#define DRIVER_DATE	"20200801"
 #define DRIVER_MAJOR	1
-#define DRIVER_MINOR	0
+#define DRIVER_MINOR	1
 
 #define MAX_CRTC	3
 
@@ -53,6 +54,14 @@ static uint xlnx_fbdev_vres = 2;
 module_param_named(fbdev_vres, xlnx_fbdev_vres, uint, 0444);
 MODULE_PARM_DESC(fbdev_vres,
 		 "fbdev virtual resolution multiplier for fb (default: 2)");
+
+#ifdef CONFIG_DRM_XLNX_DUMB_ALIGNMENT_DEFAULT_SIZE
+static uint       xlnx_dumb_alignment_size = CONFIG_DRM_XLNX_DUMB_ALIGNMENT_DEFAULT_SIZE;
+#else
+static uint       xlnx_dumb_alignment_size = 0;
+#endif
+module_param_named(dumb_alignment_size, xlnx_dumb_alignment_size, uint, S_IRUGO|S_IWUSR);
+MODULE_PARM_DESC(  dumb_alignment_size, "xlnx dumb buffer alignment size");
 
 /**
  * struct xlnx_drm - Xilinx DRM private data
@@ -72,6 +81,54 @@ struct xlnx_drm {
 	u32 master_count;
 };
 
+static int xlnx_ioctl_get_param(struct drm_device *drm, void *data, struct drm_file *file)
+{
+	struct xlnx_drm *xlnx_drm = drm->dev_private;
+	struct drm_xlnx_get_param *args = data;
+
+	if (args->pad)
+		return -EINVAL;
+
+	switch (args->param) {
+	case DRM_XLNX_PARAM_DRIVER_IDENTIFIER:
+		args->value = (__u64)DRM_XLNX_DRIVER_IDENTIFIER;
+		break;
+	case DRM_XLNX_PARAM_SCANOUT_ALIGNMENT_SIZE:
+		args->value = (__u64)xlnx_crtc_helper_get_align(xlnx_drm->crtc);
+		break;
+	case DRM_XLNX_PARAM_DUMB_ALIGNMENT_SIZE:
+		args->value = (__u64)xlnx_dumb_alignment_size;
+		break;
+	default:
+		return -EINVAL;
+	}
+
+	return 0;
+}
+		
+static int xlnx_ioctl_set_param(struct drm_device *drm, void *data, struct drm_file *file)
+{
+	struct drm_xlnx_set_param *args = data;
+
+	if (args->pad)
+		return -EINVAL;
+
+	switch (args->param) {
+	case DRM_XLNX_PARAM_DUMB_ALIGNMENT_SIZE:
+		xlnx_dumb_alignment_size = (uint)args->value;
+		break;
+	default:
+		return -EINVAL;
+	}
+
+	return 0;
+}
+		
+static const struct drm_ioctl_desc xlnx_drm_driver_ioctls[] = {
+	DRM_IOCTL_DEF_DRV(XLNX_GET_PARAM, xlnx_ioctl_get_param, DRM_RENDER_ALLOW),
+	DRM_IOCTL_DEF_DRV(XLNX_SET_PARAM, xlnx_ioctl_set_param, DRM_RENDER_ALLOW),
+};
+
 /**
  * xlnx_get_crtc_helper - Return the crtc helper instance
  * @drm: DRM device
@@ -88,14 +145,18 @@ struct xlnx_crtc_helper *xlnx_get_crtc_helper(struct drm_device *drm)
 /**
  * xlnx_get_align - Return the align requirement through CRTC helper
  * @drm: DRM device
+ * @scanout: SCANOUT 
  *
  * Return: the alignment requirement
  */
-unsigned int xlnx_get_align(struct drm_device *drm)
+unsigned int xlnx_get_align(struct drm_device *drm, bool scanout)
 {
 	struct xlnx_drm *xlnx_drm = drm->dev_private;
 
-	return xlnx_crtc_helper_get_align(xlnx_drm->crtc);
+	if (scanout || xlnx_dumb_alignment_size == 0)
+		return xlnx_crtc_helper_get_align(xlnx_drm->crtc);
+	else
+		return xlnx_dumb_alignment_size;
 }
 
 /**
@@ -211,6 +272,8 @@ static struct drm_driver xlnx_drm_driver = {
 	.gem_free_object_unlocked	= drm_gem_cma_free_object,
 	.dumb_create			= xlnx_gem_cma_dumb_create,
 	.dumb_destroy			= drm_gem_dumb_destroy,
+	.ioctls	                        = xlnx_drm_driver_ioctls,
+	.num_ioctls                     = ARRAY_SIZE(xlnx_drm_driver_ioctls),
 
 	.fops				= &xlnx_fops,
 

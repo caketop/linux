@@ -24,6 +24,21 @@ config DRM_XLNX
 	  provides the kernel mode setting functionalities
 	  for Xilinx display drivers.
 
+config DRM_XLNX_DUMB_ALIGNMENT_DEFAULT_SIZE
+	int "Xilinx DRM Dumb Buffer Alignment Default Size"
+	range 0 4096
+	default 0
+	depends on DRM_XLNX
+	help
+	  This specifies the default value for dumb buffer alignment size 
+	  of the Xilinx DRM Driver. The dumb buffer alignment size can 
+	  also be set in the module parameter. If not set by module 
+	  parameter, this value will be set to dumb buffer alignment size.
+	  If 0 is specified for the dumb buffer alignment size, Xilinx 
+	  DRM forces the alignment size to 256, which is the ZYNQMP_DPDMA 
+	  alignment size. When used with the Lima DRM driver, the dumb 
+	  buffer alignment size must be set to 8.
+
 config DRM_XLNX_BRIDGE
 	tristate "Xilinx DRM KMS bridge"
 	depends on DRM_XLNX
@@ -122,3 +137,4 @@ config DRM_XLNX_BRIDGE_VTC
 	  Currently the support is added to the Xilinx Video Mixer and
 	  Xilinx PL display CRTC drivers. This driver provides ability
 	  to generate timings through the bridge layer.
+
