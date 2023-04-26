@@ -443,7 +443,7 @@ static struct extcon_dev *dwc3_get_extcon(struct dwc3 *dwc)
 	struct device *dev = dwc->dev;
 	struct device_node *np_phy, *np_conn;
 	struct extcon_dev *edev;
-	const char *name;
+	const char *name = "";
 
 	if (device_property_read_bool(dev, "extcon"))
 		return extcon_get_edev_by_phandle(dev, 0);
@@ -568,15 +568,16 @@ int dwc3_drd_init(struct dwc3 *dwc)
 {
 	int ret, irq;
 
-	if (ROLE_SWITCH &&
-	    device_property_read_bool(dwc->dev, "usb-role-switch"))
-		return dwc3_setup_role_switch(dwc);
-
 	dwc->edev = dwc3_get_extcon(dwc);
 	if (IS_ERR(dwc->edev))
 		return PTR_ERR(dwc->edev);
 
-	if (dwc->edev) {
+	if (ROLE_SWITCH &&
+	    device_property_read_bool(dwc->dev, "usb-role-switch")) {
+		ret = dwc3_setup_role_switch(dwc);
+		if (ret < 0)
+			return ret;
+	} else if (dwc->edev) {
 		dwc->edev_nb.notifier_call = dwc3_drd_notifier;
 		ret = extcon_register_notifier(dwc->edev, EXTCON_USB_HOST,
 					       &dwc->edev_nb);

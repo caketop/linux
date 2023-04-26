@@ -628,6 +628,53 @@ static const struct file_operations dwc3_link_state_fops = {
 	.release		= single_release,
 };
 
+static int dwc3_hiber_enable_show(struct seq_file *s, void *unused)
+{
+	struct dwc3		*dwc = s->private;
+
+	seq_printf(s, "%s\n", (dwc->has_hibernation ? "Enabled" : "Disabled"));
+
+	return 0;
+}
+
+static int dwc3_hiber_enable_open(struct inode *inode, struct file *file)
+{
+	return single_open(file, dwc3_hiber_enable_show, inode->i_private);
+}
+
+static ssize_t dwc3_hiber_enable_write(struct file *file,
+				       const char __user *ubuf,
+				       size_t count, loff_t *ppos)
+{
+	struct seq_file		*s = file->private_data;
+	struct dwc3		*dwc = s->private;
+	char			buf[32];
+
+	if (copy_from_user(&buf, ubuf, min_t(size_t, sizeof(buf) - 1, count)))
+		return -EFAULT;
+
+	/* Enable hibernation feature */
+	if (!strncmp(buf, "Enable", 6)) {
+		dwc3_gadget_exit(dwc);
+		dwc->has_hibernation = 1;
+		dwc3_gadget_init(dwc);
+	} else if (!strncmp(buf, "Disable", 6)) {
+		dwc3_gadget_exit(dwc);
+		dwc->has_hibernation = 0;
+		dwc3_gadget_init(dwc);
+	} else {
+		return -EINVAL;
+	}
+
+	return count;
+}
+
+static const struct file_operations dwc3_hiber_enable_fops = {
+	.open			= dwc3_hiber_enable_open,
+	.write			= dwc3_hiber_enable_write,
+	.read			= seq_read,
+};
+
 struct dwc3_ep_file_map {
 	const char name[25];
 	const struct file_operations *const fops;
@@ -890,12 +937,28 @@ static void dwc3_debugfs_create_endpoint_files(struct dwc3_ep *dep,
 	}
 }
 
-void dwc3_debugfs_create_endpoint_dir(struct dwc3_ep *dep)
+static void dwc3_debugfs_create_endpoint_dir(struct dwc3_ep *dep,
+		struct dentry *parent)
 {
 	struct dentry		*dir;
 
-	dir = debugfs_create_dir(dep->name, dep->dwc->root);
+	dir = debugfs_create_dir(dep->name, parent);
 	dwc3_debugfs_create_endpoint_files(dep, dir);
+}
+
+static void dwc3_debugfs_create_endpoint_dirs(struct dwc3 *dwc,
+		struct dentry *parent)
+{
+	int			i;
+
+	for (i = 0; i < dwc->num_eps; i++) {
+		struct dwc3_ep	*dep = dwc->eps[i];
+
+		if (!dep)
+			continue;
+
+		dwc3_debugfs_create_endpoint_dir(dep, parent);
+	}
 }
 
 void dwc3_debugfs_init(struct dwc3 *dwc)
@@ -928,6 +991,10 @@ void dwc3_debugfs_init(struct dwc3 *dwc)
 				&dwc3_testmode_fops);
 		debugfs_create_file("link_state", 0644, root, dwc,
 				    &dwc3_link_state_fops);
+		debugfs_create_file("hiber_enable", S_IRUGO | S_IWUSR, root,
+				    dwc, &dwc3_hiber_enable_fops);
+
+		dwc3_debugfs_create_endpoint_dirs(dwc, root);
 	}
 }
 
