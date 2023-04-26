@@ -694,6 +694,16 @@ struct xhci_stream_info *xhci_alloc_stream_info(struct xhci_hcd *xhci,
 		xhci_dbg(xhci, "Setting stream %d ring ptr to 0x%08llx\n",
 				cur_stream, (unsigned long long) addr);
 
+		if (xhci->quirks & XHCI_STREAM_QUIRK) {
+			/* dwc3 host controller has an issue where it doesn't
+			 * process BULK IN stream rings even after ringing
+			 * DoorBell, so setup a timer to aviod hang condition.
+			 */
+			timer_setup(&cur_ring->stream_timer,
+				xhci_stream_timeout, 0);
+			cur_ring->xhci = xhci;
+		}
+
 		ret = xhci_update_stream_mapping(cur_ring, mem_flags);
 		if (ret) {
 			xhci_ring_free(xhci, cur_ring);
@@ -780,6 +790,10 @@ void xhci_free_stream_info(struct xhci_hcd *xhci,
 	for (cur_stream = 1; cur_stream < stream_info->num_streams;
 			cur_stream++) {
 		cur_ring = stream_info->stream_rings[cur_stream];
+
+		if (xhci->quirks & XHCI_STREAM_QUIRK)
+			del_timer_sync(&cur_ring->stream_timer);
+
 		if (cur_ring) {
 			xhci_ring_free(xhci, cur_ring);
 			stream_info->stream_rings[cur_stream] = NULL;
@@ -1938,7 +1952,6 @@ no_bw:
 	xhci->hw_ports = NULL;
 	xhci->rh_bw = NULL;
 	xhci->ext_caps = NULL;
-	xhci->port_caps = NULL;
 
 	xhci->page_size = 0;
 	xhci->page_shift = 0;
@@ -2144,15 +2157,6 @@ static void xhci_add_in_port(struct xhci_hcd *xhci, unsigned int num_ports,
 
 	if (major_revision == 0x03) {
 		rhub = &xhci->usb3_rhub;
-		/*
-		 * Some hosts incorrectly use sub-minor version for minor
-		 * version (i.e. 0x02 instead of 0x20 for bcdUSB 0x320 and 0x01
-		 * for bcdUSB 0x310). Since there is no USB release with sub
-		 * minor version 0x301 to 0x309, we can assume that they are
-		 * incorrect and fix it here.
-		 */
-		if (minor_revision > 0x00 && minor_revision < 0x10)
-			minor_revision <<= 4;
 	} else if (major_revision <= 0x02) {
 		rhub = &xhci->usb2_rhub;
 	} else {
@@ -2264,9 +2268,6 @@ static void xhci_create_rhub_port_array(struct xhci_hcd *xhci,
 		return;
 	rhub->ports = kcalloc_node(rhub->num_ports, sizeof(*rhub->ports),
 			flags, dev_to_node(dev));
-	if (!rhub->ports)
-		return;
-
 	for (i = 0; i < HCS_MAX_PORTS(xhci->hcs_params1); i++) {
 		if (xhci->hw_ports[i].rhub != rhub ||
 		    xhci->hw_ports[i].hcd_portnum == DUPLICATE_ENTRY)
@@ -2595,7 +2596,7 @@ int xhci_mem_init(struct xhci_hcd *xhci, gfp_t flags)
 
 fail:
 	xhci_halt(xhci);
-	xhci_reset(xhci, XHCI_RESET_SHORT_USEC);
+	xhci_reset(xhci);
 	xhci_mem_cleanup(xhci);
 	return -ENOMEM;
 }

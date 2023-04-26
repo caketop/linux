@@ -22,9 +22,6 @@
 #include	"xhci-ext-caps.h"
 #include "pci-quirks.h"
 
-/* max buffer size for trace and debug messages */
-#define XHCI_MSG_MAX		500
-
 /* xHCI PCI Configuration Registers */
 #define XHCI_SBRN_OFFSET	(0x60)
 
@@ -228,9 +225,6 @@ struct xhci_op_regs {
 /* bit 14 Extended TBC Enable, changes Isoc TRB fields to support larger TBC */
 #define CMD_ETE		(1 << 14)
 /* bits 15:31 are reserved (and should be preserved on writes). */
-
-#define XHCI_RESET_LONG_USEC		(10 * 1000 * 1000)
-#define XHCI_RESET_SHORT_USEC		(250 * 1000)
 
 /* IMAN - Interrupt Management Register */
 #define IMAN_IE		(1 << 1)
@@ -999,7 +993,6 @@ struct xhci_interval_bw_table {
 	unsigned int		ss_bw_out;
 };
 
-#define EP_CTX_PER_DEV		31
 
 struct xhci_virt_device {
 	struct usb_device		*udev;
@@ -1014,7 +1007,7 @@ struct xhci_virt_device {
 	struct xhci_container_ctx       *out_ctx;
 	/* Used for addressing devices and configuration changes */
 	struct xhci_container_ctx       *in_ctx;
-	struct xhci_virt_ep		eps[EP_CTX_PER_DEV];
+	struct xhci_virt_ep		eps[31];
 	u8				fake_port;
 	u8				real_port;
 	struct xhci_interval_bw_table	*bw_table;
@@ -1621,6 +1614,9 @@ struct xhci_ring {
 	enum xhci_ring_type	type;
 	bool			last_td_was_short;
 	struct radix_tree_root	*trb_address_map;
+	struct timer_list	stream_timer;
+	bool			stream_timeout_handler;
+	struct xhci_hcd		*xhci;
 };
 
 struct xhci_erst_entry {
@@ -1885,9 +1881,7 @@ struct xhci_hcd {
 #define XHCI_RENESAS_FW_QUIRK	BIT_ULL(36)
 #define XHCI_SKIP_PHY_INIT	BIT_ULL(37)
 #define XHCI_DISABLE_SPARSE	BIT_ULL(38)
-#define XHCI_SG_TRB_CACHE_SIZE_QUIRK	BIT_ULL(39)
-#define XHCI_NO_SOFT_RETRY	BIT_ULL(40)
-#define XHCI_EP_CTX_BROKEN_DCS	BIT_ULL(42)
+#define XHCI_STREAM_QUIRK	BIT_ULL(39) /* FIXME this is wrong */
 
 	unsigned int		num_active_eps;
 	unsigned int		limit_active_eps;
@@ -1925,8 +1919,6 @@ struct xhci_driver_overrides {
 	size_t extra_priv_size;
 	int (*reset)(struct usb_hcd *hcd);
 	int (*start)(struct usb_hcd *hcd);
-	int (*check_bandwidth)(struct usb_hcd *, struct usb_device *);
-	void (*reset_bandwidth)(struct usb_hcd *, struct usb_device *);
 };
 
 #define	XHCI_CFC_DELAY		10
@@ -2071,18 +2063,18 @@ void xhci_free_container_ctx(struct xhci_hcd *xhci,
 
 /* xHCI host controller glue */
 typedef void (*xhci_get_quirks_t)(struct device *, struct xhci_hcd *);
-int xhci_handshake(void __iomem *ptr, u32 mask, u32 done, u64 timeout_us);
+typedef void (*host_wakeup_t)(struct device *dev, bool wakeup);
+void dwc3_host_wakeup_capable(struct device *dev, bool wakeup);
+int xhci_handshake(void __iomem *ptr, u32 mask, u32 done, int usec);
 void xhci_quiesce(struct xhci_hcd *xhci);
 int xhci_halt(struct xhci_hcd *xhci);
 int xhci_start(struct xhci_hcd *xhci);
-int xhci_reset(struct xhci_hcd *xhci, u64 timeout_us);
+int xhci_reset(struct xhci_hcd *xhci);
 int xhci_run(struct usb_hcd *hcd);
 int xhci_gen_setup(struct usb_hcd *hcd, xhci_get_quirks_t get_quirks);
 void xhci_shutdown(struct usb_hcd *hcd);
 void xhci_init_driver(struct hc_driver *drv,
 		      const struct xhci_driver_overrides *over);
-int xhci_check_bandwidth(struct usb_hcd *hcd, struct usb_device *udev);
-void xhci_reset_bandwidth(struct usb_hcd *hcd, struct usb_device *udev);
 int xhci_disable_slot(struct xhci_hcd *xhci, u32 slot_id);
 int xhci_ext_cap_init(struct xhci_hcd *xhci);
 
@@ -2141,6 +2133,7 @@ void xhci_cleanup_stalled_ring(struct xhci_hcd *xhci, unsigned int slot_id,
 			       unsigned int ep_index, unsigned int stream_id,
 			       struct xhci_td *td);
 void xhci_stop_endpoint_command_watchdog(struct timer_list *t);
+void xhci_stream_timeout(struct timer_list *unused);
 void xhci_handle_command_timeout(struct work_struct *work);
 
 void xhci_ring_ep_doorbell(struct xhci_hcd *xhci, unsigned int slot_id,
@@ -2230,14 +2223,15 @@ static inline char *xhci_slot_state_string(u32 state)
 	}
 }
 
-static inline const char *xhci_decode_trb(char *str, size_t size,
-					  u32 field0, u32 field1, u32 field2, u32 field3)
+static inline const char *xhci_decode_trb(u32 field0, u32 field1, u32 field2,
+		u32 field3)
 {
+	static char str[256];
 	int type = TRB_FIELD_TO_TYPE(field3);
 
 	switch (type) {
 	case TRB_LINK:
-		snprintf(str, size,
+		sprintf(str,
 			"LINK %08x%08x intr %d type '%s' flags %c:%c:%c:%c",
 			field1, field0, GET_INTR_TARGET(field2),
 			xhci_trb_type_string(type),
@@ -2254,7 +2248,7 @@ static inline const char *xhci_decode_trb(char *str, size_t size,
 	case TRB_HC_EVENT:
 	case TRB_DEV_NOTE:
 	case TRB_MFINDEX_WRAP:
-		snprintf(str, size,
+		sprintf(str,
 			"TRB %08x%08x status '%s' len %d slot %d ep %d type '%s' flags %c:%c",
 			field1, field0,
 			xhci_trb_comp_code_string(GET_COMP_CODE(field2)),
@@ -2267,8 +2261,7 @@ static inline const char *xhci_decode_trb(char *str, size_t size,
 
 		break;
 	case TRB_SETUP:
-		snprintf(str, size,
-			"bRequestType %02x bRequest %02x wValue %02x%02x wIndex %02x%02x wLength %d length %d TD size %d intr %d type '%s' flags %c:%c:%c",
+		sprintf(str, "bRequestType %02x bRequest %02x wValue %02x%02x wIndex %02x%02x wLength %d length %d TD size %d intr %d type '%s' flags %c:%c:%c",
 				field0 & 0xff,
 				(field0 & 0xff00) >> 8,
 				(field0 & 0xff000000) >> 24,
@@ -2285,8 +2278,7 @@ static inline const char *xhci_decode_trb(char *str, size_t size,
 				field3 & TRB_CYCLE ? 'C' : 'c');
 		break;
 	case TRB_DATA:
-		snprintf(str, size,
-			 "Buffer %08x%08x length %d TD size %d intr %d type '%s' flags %c:%c:%c:%c:%c:%c:%c",
+		sprintf(str, "Buffer %08x%08x length %d TD size %d intr %d type '%s' flags %c:%c:%c:%c:%c:%c:%c",
 				field1, field0, TRB_LEN(field2), GET_TD_SIZE(field2),
 				GET_INTR_TARGET(field2),
 				xhci_trb_type_string(type),
@@ -2299,8 +2291,7 @@ static inline const char *xhci_decode_trb(char *str, size_t size,
 				field3 & TRB_CYCLE ? 'C' : 'c');
 		break;
 	case TRB_STATUS:
-		snprintf(str, size,
-			 "Buffer %08x%08x length %d TD size %d intr %d type '%s' flags %c:%c:%c:%c",
+		sprintf(str, "Buffer %08x%08x length %d TD size %d intr %d type '%s' flags %c:%c:%c:%c",
 				field1, field0, TRB_LEN(field2), GET_TD_SIZE(field2),
 				GET_INTR_TARGET(field2),
 				xhci_trb_type_string(type),
@@ -2313,7 +2304,7 @@ static inline const char *xhci_decode_trb(char *str, size_t size,
 	case TRB_ISOC:
 	case TRB_EVENT_DATA:
 	case TRB_TR_NOOP:
-		snprintf(str, size,
+		sprintf(str,
 			"Buffer %08x%08x length %d TD size %d intr %d type '%s' flags %c:%c:%c:%c:%c:%c:%c:%c",
 			field1, field0, TRB_LEN(field2), GET_TD_SIZE(field2),
 			GET_INTR_TARGET(field2),
@@ -2330,21 +2321,21 @@ static inline const char *xhci_decode_trb(char *str, size_t size,
 
 	case TRB_CMD_NOOP:
 	case TRB_ENABLE_SLOT:
-		snprintf(str, size,
+		sprintf(str,
 			"%s: flags %c",
 			xhci_trb_type_string(type),
 			field3 & TRB_CYCLE ? 'C' : 'c');
 		break;
 	case TRB_DISABLE_SLOT:
 	case TRB_NEG_BANDWIDTH:
-		snprintf(str, size,
+		sprintf(str,
 			"%s: slot %d flags %c",
 			xhci_trb_type_string(type),
 			TRB_TO_SLOT_ID(field3),
 			field3 & TRB_CYCLE ? 'C' : 'c');
 		break;
 	case TRB_ADDR_DEV:
-		snprintf(str, size,
+		sprintf(str,
 			"%s: ctx %08x%08x slot %d flags %c:%c",
 			xhci_trb_type_string(type),
 			field1, field0,
@@ -2353,7 +2344,7 @@ static inline const char *xhci_decode_trb(char *str, size_t size,
 			field3 & TRB_CYCLE ? 'C' : 'c');
 		break;
 	case TRB_CONFIG_EP:
-		snprintf(str, size,
+		sprintf(str,
 			"%s: ctx %08x%08x slot %d flags %c:%c",
 			xhci_trb_type_string(type),
 			field1, field0,
@@ -2362,7 +2353,7 @@ static inline const char *xhci_decode_trb(char *str, size_t size,
 			field3 & TRB_CYCLE ? 'C' : 'c');
 		break;
 	case TRB_EVAL_CONTEXT:
-		snprintf(str, size,
+		sprintf(str,
 			"%s: ctx %08x%08x slot %d flags %c",
 			xhci_trb_type_string(type),
 			field1, field0,
@@ -2370,7 +2361,7 @@ static inline const char *xhci_decode_trb(char *str, size_t size,
 			field3 & TRB_CYCLE ? 'C' : 'c');
 		break;
 	case TRB_RESET_EP:
-		snprintf(str, size,
+		sprintf(str,
 			"%s: ctx %08x%08x slot %d ep %d flags %c:%c",
 			xhci_trb_type_string(type),
 			field1, field0,
@@ -2391,7 +2382,7 @@ static inline const char *xhci_decode_trb(char *str, size_t size,
 			field3 & TRB_CYCLE ? 'C' : 'c');
 		break;
 	case TRB_SET_DEQ:
-		snprintf(str, size,
+		sprintf(str,
 			"%s: deq %08x%08x stream %d slot %d ep %d flags %c",
 			xhci_trb_type_string(type),
 			field1, field0,
@@ -2402,14 +2393,14 @@ static inline const char *xhci_decode_trb(char *str, size_t size,
 			field3 & TRB_CYCLE ? 'C' : 'c');
 		break;
 	case TRB_RESET_DEV:
-		snprintf(str, size,
+		sprintf(str,
 			"%s: slot %d flags %c",
 			xhci_trb_type_string(type),
 			TRB_TO_SLOT_ID(field3),
 			field3 & TRB_CYCLE ? 'C' : 'c');
 		break;
 	case TRB_FORCE_EVENT:
-		snprintf(str, size,
+		sprintf(str,
 			"%s: event %08x%08x vf intr %d vf id %d flags %c",
 			xhci_trb_type_string(type),
 			field1, field0,
@@ -2418,14 +2409,14 @@ static inline const char *xhci_decode_trb(char *str, size_t size,
 			field3 & TRB_CYCLE ? 'C' : 'c');
 		break;
 	case TRB_SET_LT:
-		snprintf(str, size,
+		sprintf(str,
 			"%s: belt %d flags %c",
 			xhci_trb_type_string(type),
 			TRB_TO_BELT(field3),
 			field3 & TRB_CYCLE ? 'C' : 'c');
 		break;
 	case TRB_GET_BW:
-		snprintf(str, size,
+		sprintf(str,
 			"%s: ctx %08x%08x slot %d speed %d flags %c",
 			xhci_trb_type_string(type),
 			field1, field0,
@@ -2434,7 +2425,7 @@ static inline const char *xhci_decode_trb(char *str, size_t size,
 			field3 & TRB_CYCLE ? 'C' : 'c');
 		break;
 	case TRB_FORCE_HEADER:
-		snprintf(str, size,
+		sprintf(str,
 			"%s: info %08x%08x%08x pkt type %d roothub port %d flags %c",
 			xhci_trb_type_string(type),
 			field2, field1, field0 & 0xffffffe0,
@@ -2443,7 +2434,7 @@ static inline const char *xhci_decode_trb(char *str, size_t size,
 			field3 & TRB_CYCLE ? 'C' : 'c');
 		break;
 	default:
-		snprintf(str, size,
+		sprintf(str,
 			"type '%s' -> raw %08x %08x %08x %08x",
 			xhci_trb_type_string(type),
 			field0, field1, field2, field3);
@@ -2452,13 +2443,12 @@ static inline const char *xhci_decode_trb(char *str, size_t size,
 	return str;
 }
 
-static inline const char *xhci_decode_ctrl_ctx(char *str,
-		unsigned long drop, unsigned long add)
+static inline const char *xhci_decode_ctrl_ctx(unsigned long drop,
+					       unsigned long add)
 {
+	static char	str[1024];
 	unsigned int	bit;
 	int		ret = 0;
-
-	str[0] = '\0';
 
 	if (drop) {
 		ret = sprintf(str, "Drop:");
@@ -2482,9 +2472,10 @@ static inline const char *xhci_decode_ctrl_ctx(char *str,
 	return str;
 }
 
-static inline const char *xhci_decode_slot_context(char *str,
-		u32 info, u32 info2, u32 tt_info, u32 state)
+static inline const char *xhci_decode_slot_context(u32 info, u32 info2,
+		u32 tt_info, u32 state)
 {
+	static char str[1024];
 	u32 speed;
 	u32 hub;
 	u32 mtt;
@@ -2568,8 +2559,9 @@ static inline const char *xhci_portsc_link_state_string(u32 portsc)
 	return "Unknown";
 }
 
-static inline const char *xhci_decode_portsc(char *str, u32 portsc)
+static inline const char *xhci_decode_portsc(u32 portsc)
 {
+	static char str[256];
 	int ret;
 
 	ret = sprintf(str, "%s %s %s Link:%s PortSpeed:%d ",
@@ -2613,15 +2605,13 @@ static inline const char *xhci_decode_portsc(char *str, u32 portsc)
 	return str;
 }
 
-static inline const char *xhci_decode_usbsts(char *str, u32 usbsts)
+static inline const char *xhci_decode_usbsts(u32 usbsts)
 {
+	static char str[256];
 	int ret = 0;
 
-	ret = sprintf(str, " 0x%08x", usbsts);
-
 	if (usbsts == ~(u32)0)
-		return str;
-
+		return " 0xffffffff";
 	if (usbsts & STS_HALT)
 		ret += sprintf(str + ret, " HCHalted");
 	if (usbsts & STS_FATAL)
@@ -2644,8 +2634,9 @@ static inline const char *xhci_decode_usbsts(char *str, u32 usbsts)
 	return str;
 }
 
-static inline const char *xhci_decode_doorbell(char *str, u32 slot, u32 doorbell)
+static inline const char *xhci_decode_doorbell(u32 slot, u32 doorbell)
 {
+	static char str[256];
 	u8 ep;
 	u16 stream;
 	int ret;
@@ -2712,9 +2703,10 @@ static inline const char *xhci_ep_type_string(u8 type)
 	}
 }
 
-static inline const char *xhci_decode_ep_context(char *str, u32 info,
-		u32 info2, u64 deq, u32 tx_info)
+static inline const char *xhci_decode_ep_context(u32 info, u32 info2, u64 deq,
+		u32 tx_info)
 {
+	static char str[1024];
 	int ret;
 
 	u32 esit;
