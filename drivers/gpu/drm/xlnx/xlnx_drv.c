@@ -23,9 +23,11 @@
 #include <drm/drm_atomic_helper.h>
 #include <drm/drm_crtc_helper.h>
 #include <drm/drm_fb_helper.h>
-#include <drm/drm_gem_cma_helper.h>
 #include <drm/drm_of.h>
 #include <drm/drm_probe_helper.h>
+#include <drm/drm_ioctl.h>
+#include <drm/drm_file.h>
+#include <drm/drm_gem.h>
 #include <drm/xlnx_drm.h>
 
 #include <linux/component.h>
@@ -44,7 +46,7 @@
 
 #define DRIVER_NAME	"xlnx"
 #define DRIVER_DESC	"Xilinx DRM KMS Driver"
-#define DRIVER_DATE	"20200801"
+#define DRIVER_DATE	"20200924"
 #define DRIVER_MAJOR	1
 #define DRIVER_MINOR	1
 
@@ -62,6 +64,14 @@ static uint       xlnx_dumb_alignment_size = 0;
 #endif
 module_param_named(dumb_alignment_size, xlnx_dumb_alignment_size, uint, S_IRUGO|S_IWUSR);
 MODULE_PARM_DESC(  dumb_alignment_size, "xlnx dumb buffer alignment size");
+
+#ifdef CONFIG_DRM_XLNX_DUMB_CACHE_DEFAULT_MODE
+static uint       xlnx_dumb_cache_default_mode = CONFIG_DRM_XLNX_DUMB_CACHE_DEFAULT_MODE;
+#else
+static uint       xlnx_dumb_cache_default_mode = 0;
+#endif
+module_param_named(dumb_cache_default_mode, xlnx_dumb_cache_default_mode, uint, S_IRUGO|S_IWUSR);
+MODULE_PARM_DESC(  dumb_cache_default_mode, "xlnx dumb buffer cache default mode on=1/off=0");
 
 /**
  * struct xlnx_drm - Xilinx DRM private data
@@ -99,6 +109,12 @@ static int xlnx_ioctl_get_param(struct drm_device *drm, void *data, struct drm_f
 	case DRM_XLNX_PARAM_DUMB_ALIGNMENT_SIZE:
 		args->value = (__u64)xlnx_dumb_alignment_size;
 		break;
+	case DRM_XLNX_PARAM_DUMB_CACHE_AVALABLE:
+		args->value = 1;
+		break;
+        case DRM_XLNX_PARAM_DUMB_CACHE_DEFAULT_MODE:
+		args->value = (__u64)xlnx_dumb_cache_default_mode;
+		break;
 	default:
 		return -EINVAL;
 	}
@@ -116,6 +132,9 @@ static int xlnx_ioctl_set_param(struct drm_device *drm, void *data, struct drm_f
 	switch (args->param) {
 	case DRM_XLNX_PARAM_DUMB_ALIGNMENT_SIZE:
 		xlnx_dumb_alignment_size = (uint)args->value;
+		break;
+        case DRM_XLNX_PARAM_DUMB_CACHE_DEFAULT_MODE:
+		xlnx_dumb_cache_default_mode = (uint)args->value;
 		break;
 	default:
 		return -EINVAL;
@@ -157,6 +176,18 @@ unsigned int xlnx_get_align(struct drm_device *drm, bool scanout)
 		return xlnx_crtc_helper_get_align(xlnx_drm->crtc);
 	else
 		return xlnx_dumb_alignment_size;
+}
+
+/**
+ * xlnx_get_dumb_cache_default_mode - Return the xlnx_dumb_cache_default_mode
+ * @drm: DRM device
+ * @scanout: SCANOUT 
+ *
+ * Return: the alignment requirement
+ */
+unsigned int xlnx_get_dumb_cache_default_mode(struct drm_device *drm)
+{
+	return xlnx_dumb_cache_default_mode;
 }
 
 /**
@@ -244,7 +275,7 @@ static const struct file_operations xlnx_fops = {
 	.open		= drm_open,
 	.release	= xlnx_drm_release,
 	.unlocked_ioctl	= drm_ioctl,
-	.mmap		= drm_gem_cma_mmap,
+	.mmap		= xlnx_gem_file_mmap,
 	.poll		= drm_poll,
 	.read		= drm_read,
 #ifdef CONFIG_COMPAT
@@ -252,6 +283,8 @@ static const struct file_operations xlnx_fops = {
 #endif
 	.llseek		= noop_llseek,
 };
+
+extern struct vm_operations_struct xlnx_gem_vm_ops;
 
 static struct drm_driver xlnx_drm_driver = {
 	.driver_features		= DRIVER_MODESET | DRIVER_GEM |
@@ -263,14 +296,14 @@ static struct drm_driver xlnx_drm_driver = {
 	.prime_fd_to_handle		= drm_gem_prime_fd_to_handle,
 	.gem_prime_export		= drm_gem_prime_export,
 	.gem_prime_import		= drm_gem_prime_import,
-	.gem_prime_get_sg_table		= drm_gem_cma_prime_get_sg_table,
-	.gem_prime_import_sg_table	= drm_gem_cma_prime_import_sg_table,
-	.gem_prime_vmap			= drm_gem_cma_prime_vmap,
-	.gem_prime_vunmap		= drm_gem_cma_prime_vunmap,
-	.gem_prime_mmap			= drm_gem_cma_prime_mmap,
-	.gem_vm_ops			= &drm_gem_cma_vm_ops,
-	.gem_free_object_unlocked	= drm_gem_cma_free_object,
-	.dumb_create			= xlnx_gem_cma_dumb_create,
+	.gem_prime_get_sg_table		= xlnx_gem_prime_get_sg_table,
+	.gem_prime_import_sg_table	= xlnx_gem_prime_import_sg_table_vmap,
+	.gem_prime_vmap			= xlnx_gem_prime_vmap,
+	.gem_prime_vunmap		= xlnx_gem_prime_vunmap,
+	.gem_prime_mmap			= xlnx_gem_prime_mmap,
+	.gem_vm_ops			= &xlnx_gem_vm_ops,
+	.gem_free_object_unlocked	= xlnx_gem_free_object,
+	.dumb_create			= xlnx_gem_dumb_create,
 	.dumb_destroy			= drm_gem_dumb_destroy,
 	.ioctls	                        = xlnx_drm_driver_ioctls,
 	.num_ioctls                     = ARRAY_SIZE(xlnx_drm_driver_ioctls),

@@ -16,7 +16,6 @@ config DRM_XLNX
 	depends on DRM && OF
 	select DRM_KMS_HELPER
 	select DRM_KMS_CMA_HELPER
-	select DRM_GEM_CMA_HELPER
 	help
 	  Xilinx DRM KMS driver. Choose this option if you have
 	  a Xilinx SoCs with hardened display pipeline or soft
@@ -39,6 +38,21 @@ config DRM_XLNX_DUMB_ALIGNMENT_DEFAULT_SIZE
 	  alignment size. When used with the Lima DRM driver, the dumb 
 	  buffer alignment size must be set to 8.
 
+config DRM_XLNX_DUMB_CACHE_DEFAULT_MODE
+	int "Xilinx DRM Dumb Buffer Cache Default Mode"
+	range 0 1
+	default 0
+	depends on DRM_XLNX
+	help
+	  Thie specifies the data cache state of dumb buffer of the
+	  Xilinx DRM Driver. The dumb buffer data cache mode can also
+	  bo set in the module parameter. If not set by module parameter,
+	  this value will be set to dumb buffer data cache state.
+	  If 0 is specified, the dumb buffer data cache mode is set to
+	  write combine and read cache off.
+	  If 1 is specified, the dumb buffer data cache mode is set to
+	  write back and read cache on.
+	  
 config DRM_XLNX_BRIDGE
 	tristate "Xilinx DRM KMS bridge"
 	depends on DRM_XLNX
